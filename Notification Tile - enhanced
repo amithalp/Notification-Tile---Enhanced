@@ -70,7 +70,7 @@ metadata {
 		input("leadingDate", "bool", title:"Use leading date instead of trailing")
 		input("msgLimit", "number", title:"Number of messages from 1 to 20",defaultValue:5, range:1..20)
 		input("create5H", "bool", title: "Create horizontal message tile?")
-		
+	/* Add color options */	
         input("colorE", "text", title: "Color for [E] Emergency", defaultValue: "red")
         input("colorH", "text", title: "Color for [H] High", defaultValue: "orange")
         input("colorL", "text", title: "Color for [L] Low", defaultValue: "goldenrod")
@@ -168,90 +168,73 @@ metadata {
         }
 	}
 
-void deviceNotification(notification){
-        if (debugEnable) log.debug "deviceNotification entered: ${notification}" 
+void deviceNotification(notification) {
+    if (debugEnable) log.debug "deviceNotification entered: ${notification}"
 
-        dateNow = new Date()
-        if(sdfPref == null) device.updateSetting("sdfPref",[value:"ddMMMyyyy HH:mm",type:"enum"])
+    def dateNow = new Date()
+    if (sdfPref == null) device.updateSetting("sdfPref", [value: "ddMMMyyyy HH:mm", type: "enum"])
 
-        String originalMsg = notification?.trim()
+    String originalMsg = notification?.trim()
+    String tag = originalMsg.find(/\[[A-Z]\]/)
+    String cleanedMsg = originalMsg.replaceFirst(/\[[A-Z]\]/, '').trim()
 
-        // Keep the tag for parsing, remove after colorization
-        String msgForColor = originalMsg
-        String tag = msgForColor.find(/\[[A-Z]\]/)  // e.g. [E], [H], etc.
-        String cleanedMsg = originalMsg.replaceFirst(/\[[A-Z]\]/, '').trim()
+    String timestamp = ""
+    if (sdfPref != "None") {
+        SimpleDateFormat sdf = new SimpleDateFormat(sdfPref)
+        timestamp = sdf.format(dateNow)
+    }
 
-        // Add timestamp
-        String timestamp = ""
-        if (sdfPref != "None") {
-            SimpleDateFormat sdf = new SimpleDateFormat(sdfPref)
-            timestamp = sdf.format(dateNow)
-        }
+    String msgWithTime = leadingDate ? "${timestamp} ${cleanedMsg}" : "${cleanedMsg} ${timestamp}"
+    String msgWithTag = tag ? "${tag} ${msgWithTime}".trim() : msgWithTime
 
-        String msgWithTime = leadingDate ? "${timestamp} ${cleanedMsg}" : "${cleanedMsg} ${timestamp}"
+    String formattedMsg = colorizeNotification(msgWithTag)
+    if (debugEnable) log.debug "Formatted message: ${formattedMsg}"
 
-        // Reattach the tag temporarily for coloring
-        String msgWithTag = tag ? "${tag} ${msgWithTime}".trim() : msgWithTime
+    // Pull current messages and strip outer span wrapper
+    String existing = device.currentValue("last5")?.replaceAll(/^<span class="last5">|<\/span>$/, '')?.trim()
+    def msgFilled = state.msgCount?.toInteger() ?: 0
 
-        // Colorize
-        notification = colorizeNotification(msgWithTag)
-        //if (debugEnable) log.debug "deviceNotification entered: ${notification}"
-		if (debugEnable) log.debug "Final colorized notification: ${notification}"
+    String newTile = (msgFilled > 0 && existing) ? "${formattedMsg}<br />${existing}" : formattedMsg
 
-    
+    // Trim messages if over msgLimit
+    if (msgFilled < settings.msgLimit.toInteger()) {
+        msgFilled++
+    } else {
+        def parts = newTile.split(/<br \/>/)
+        parts = parts.take(settings.msgLimit.toInteger())
+        newTile = parts.join("<br />")
+        msgFilled = parts.size()
+    }
 
-	//	insert new message at beginning	of last5 string
-		msgFilled = state.msgCount.toInteger()
-		String existing = device.currentValue("last5")?.replace('<span class="last5">', '')?.replace('</span>', '')?.trim()
-		if (msgFilled > 0 && existing) {
-            wkTile = '<span class="last5">' + notification + '<br />' + existing + '</span>'
+    // Enforce max size (1024)
+    while (newTile.length() > 1024 && msgFilled > 0) {
+        def i = newTile.lastIndexOf('<br />')
+        if (i != -1) {
+            newTile = newTile.substring(0, i)
+            msgFilled--
         } else {
-            wkTile = '<span class="last5">' + notification + '</span>'
+            newTile = ''
+            msgFilled = 0
         }
+    }
+
+    // Final wrap
+    String wrappedTile = '<span class="last5">' + newTile + '</span>'
+
+    sendEvent(name: "last5", value: wrappedTile)
+    state.msgCount = msgFilled
+
+    if (settings.create5H) {
+        sendEvent(name: "last5H", value: " ** " + newTile.replaceAll("<br />", " ** ") + " ** ")
+    }
+}
 
 
-	//	when msg count exceeds limit, purge last message
-		if (debugEnable) log.debug "deviceNotification2 msgFilled: ${msgFilled} msgLimit: ${settings.msgLimit}" 
-		if (msgFilled < settings.msgLimit.toInteger())
-			msgFilled++
-		else
-			{
-			int i = wkTile.lastIndexOf('<br />');
-			if (i != -1) 
-				wkTile = wkTile.substring(0, i) + '</span>';
-			}
-
-	//	Ensure tile length is less than 1024 and hopefully stop loops
-		int wkLen=wkTile.length()	
-		while (wkLen > 1024 && msgFilled > 0)
-			{
-			if (debugEnable) log.debug "wkTile length ${wkLen}> 1024 truncating msgCount: ${msgFilled}"
-			int i = wkTile.lastIndexOf('<br />');
-			if (i != -1) 
-				{
-				wkTile = wkTile.substring(0, i) + '</span>';
-				msgFilled--
-				}
-			else
-				{
-				wkTile='<span class="last5"></span>'
-				msgFilled=0
-				}
-			wkLen=wkTile.length()
-			if (debugEnable) log.debug "Truncated wkTile length ${wkLen}, msgCount: ${msgFilled}"
-			}
-
-	//	Update attributes and state
-		sendEvent(name:"last5", value: wkTile)
-		state.msgCount = msgFilled
-		if (settings.create5H)
-			sendEvent(name:"last5H", value: " ** "+wkTile.replaceAll("<br />"," ** ")+" ** ")
-	}    
 
 String colorizeNotification(String msg) {
     String color
     String cleanedMsg
-    boolean bold
+    boolean bold = false
 
     if (msg.startsWith("[E]")) {
         color = settings.colorE ?: "red"
@@ -275,9 +258,12 @@ String colorizeNotification(String msg) {
         cleanedMsg = msg
     }
 
-    def formatted = "<span style='color:${color};${bold ? " font-weight:bold;" : ""}'>${cleanedMsg}</span>"
-    return formatted
+    String style = "color:${color};"
+    if (bold) style += " font-weight:bold;"
+
+    return "<span style='${style}'>${cleanedMsg}</span>"
 }
+
 
 
 void logsOff(){
